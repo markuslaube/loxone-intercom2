@@ -14,6 +14,13 @@ Miniserver — no hardcoded URLs or credentials.
 
 **Status:** Beta · Video only · [Details](rtc-bridge/)
 
+### [rtc-directbridge](rtc-directbridge/)
+
+Same as rtc-bridge, but connects directly to the Intercom via plain `ws://`.
+No Miniserver, no TLS, no reverse proxy — just the Intercom IP.
+
+**Status:** Beta · Video only · [Details](rtc-directbridge/)
+
 ## Wishlist
 
 - [ ] Two-way audio (SIP/PJSUA2)
