@@ -1,3 +1,5 @@
+![AI Contribution](https://raw.githubusercontent.com/Essk/ai-contribution-level/main/badges/level-3.svg)
+
 # Loxone Intercom2 Direct Bridge
 
 Docker container that bridges a Loxone Intercom Gen.2 doorbell camera into
