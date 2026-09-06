@@ -1,6 +1,6 @@
-# loxone-intercom2
-
 ![AI Contribution](https://raw.githubusercontent.com/Essk/ai-contribution-level/main/badges/level-3.svg)
+
+# loxone-intercom2
 
 Unofficial community integrations for the Loxone Intercom Gen.2.
 
