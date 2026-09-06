@@ -89,9 +89,18 @@ IDR_NAL = 5
 
 _stdout_fd = os.dup(1)
 
+_last_rtp_time = [0.0]
+
 
 def write_stdout(data):
-    os.write(_stdout_fd, data)
+    try:
+        os.write(_stdout_fd, data)
+    except BrokenPipeError:
+        logger.error("stdout pipe broken (ffmpeg dead?), exiting")
+        os._exit(1)
+    except OSError:
+        logger.error("stdout write failed, exiting")
+        os._exit(1)
 
 
 def depacketize_h264(payload, state):
@@ -164,6 +173,7 @@ _depacket_state = {}
 
 async def _patched_rtp_data(self, data, arrival_time_ms):
     if len(data) >= 12:
+        _last_rtp_time[0] = time.monotonic()
         b0 = data[0]
         b1 = data[1]
         cc = b0 & 0x0F
@@ -344,6 +354,7 @@ async def fetch_device_info(ws):
 
 
 async def run_session():
+    _last_rtp_time[0] = 0.0
     proxy_url = get_proxy_url()
 
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
@@ -484,6 +495,12 @@ async def run_session():
 
             if pc.connectionState in ("failed", "closed"):
                 break
+
+            if got_answer and _last_rtp_time[0] > 0:
+                silence = time.monotonic() - _last_rtp_time[0]
+                if silence > 10:
+                    logger.warning("No RTP for %.0fs, ending session", silence)
+                    break
 
     await pc.close()
 
