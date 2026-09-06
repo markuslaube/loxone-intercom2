@@ -1,0 +1,5 @@
+# mediamtx minimal config — Loxone Intercom2 Bridge
+# RTSP on :8554, accept any path for publish + read
+
+paths:
+  all_others:

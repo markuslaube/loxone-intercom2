@@ -1,0 +1,32 @@
+version: "3.8"
+
+services:
+  loxone-bridge:
+    image: laubi/loxone-intercom-bridge:latest
+    environment:
+      # === Required ===
+      - LOXONE_MINISERVER_IP=192.168.1.100
+      - LOXONE_MINISERVER_USER=your_miniserver_user
+      - LOXONE_MINISERVER_PASS=your_miniserver_password
+
+      # === Optional (defaults shown) ===
+      # - LOXONE_DEVICE_UUID=                 # Multi-intercom: pick specific device
+      # - LOXONE_PROXY_URL=                    # Full WSS URL override
+      # - LOXONE_TURN_SERVER=stun.loxonecloud.com:3478
+      # - LOXONE_STUN_SERVER=stun.l.google.com:19302
+      # - LOXONE_RTSP_HOST=loxone-bridge
+      # - LOXONE_RTSP_PORT=8554
+      # - LOXONE_STREAM_NAME=loxone_intercom
+      # - GO2RTC_API_URL=http://go2rtc:1984
+      # - LOXONE_GO2RTC_RECONCILE_SECONDS=20
+      # - LOXONE_LOG_LEVEL=INFO
+    networks:
+      - default
+
+networks:
+  default:
+    # Put this container in the same network as your go2rtc instance.
+    # For Home Assistant / Frigate setups, this is often the addon network:
+    # default:
+    #   external: true
+    #   name: homeassistant-addons_default
