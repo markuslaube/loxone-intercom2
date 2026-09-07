@@ -21,11 +21,19 @@ No Miniserver, no TLS, no reverse proxy — just the Intercom IP.
 
 **Status:** Beta · Video only · [Details](rtc-directbridge/)
 
+### In Development: [sip-directbridge](sip-directbridge/)
+
+Bridges the Intercom's SIP audio to any SIP account for integration in Home Assistant. 
+Makes your phone ring when someone's at the door and establishes a two-way audio intercom call.
+
+**Status:** Development · Audio only · [Details](sip-directbridge/)
+
 ## Wishlist
 
 - [ ] Two-way audio (SIP/PJSUA2)
+- [ ] One-way audio (webrtc) für rtc-directbridge (wird erstmal sip2rtc)
+- [ ] One-way audio (webrtc) für rtc-bridge (wird erstmal sip2rtc)
 - [ ] Two-way audio (webrtc)
-- [ ] One-way audio (webrtc) für rtc-directbridge & rtc-bridge (wird erstmal sip2rtc)
 - [ ] Motion/event snapshots
 - [ ] Doorbell ring notifications
 - [ ] Direct Home Assistant integration (custom component)
