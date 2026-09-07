@@ -24,6 +24,7 @@ No Miniserver, no TLS, no reverse proxy — just the Intercom IP.
 ## Wishlist
 
 - [ ] Two-way audio (SIP/PJSUA2)
+- [ ] Two-way audio (webrtc)
 - [ ] Motion/event snapshots
 - [ ] Doorbell ring notifications
 - [ ] Direct Home Assistant integration (custom component)
