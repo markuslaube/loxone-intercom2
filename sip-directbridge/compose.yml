@@ -2,9 +2,31 @@ version: "3.8"
 
 services:
   sip-directbridge:
-    build: .
-    container_name: sip-directbridge
-    restart: unless-stopped
-    network_mode: host
-    env_file: .env
+    image: laubi/loxone-sip-directbridge:latest
+    environment:
+      # === Required ===
+      - LOXONE_INTERCOM_IP=192.168.1.190
+      - SIP_REGISTRAR=192.168.1.253
+      - SIP_USER=sipuser
+      - SIP_PASSWORD=sippassword
+      - SIP_DESTINATION=**610
+
+      # === Optional (defaults shown) ===
+      # - LOXONE_MINISERVER_IP=192.168.1.196
+      # - LOXONE_MINISERVER_USER=myuser
+      # - LOXONE_MINISERVER_PASS=mypassword
+      # - LOXONE_DOORBELL_UUID=  (leave empty to auto-discover)
+      # - SIP_LISTEN_PORT=5060
+      # - WEBHOOK_PORT=42713
+      # - CALL_TIMEOUT=0
     command: ["--websocket"]
+    networks:
+      - default
+
+networks:
+  default:
+    # Put this container in the same network as your SIP registrar.
+    # For Home Assistant setups, this is often the addon network:
+    # default:
+    #   external: true
+    #   name: homeassistant-addons_default
