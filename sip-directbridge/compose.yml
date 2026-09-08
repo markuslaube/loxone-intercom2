@@ -1,0 +1,10 @@
+version: "3.8"
+
+services:
+  sip-directbridge:
+    build: .
+    container_name: sip-directbridge
+    restart: unless-stopped
+    network_mode: host
+    env_file: .env
+    command: ["--websocket"]
