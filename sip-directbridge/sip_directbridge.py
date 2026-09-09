@@ -1363,12 +1363,12 @@ class SIPListener:
 # ---------------------------------------------------------------------------
 
 async def main_async(config):
-    bridge = ConferenceBridge(config)
-    conference_busy = asyncio.Event()
-    conference_busy.clear()
-
     sip_listener = SIPListener(config)
     sip_listener.start()
+
+    bridge = ConferenceBridge(config)
+    bridge.bye_listener = sip_listener
+    conference_busy = asyncio.Event()
 
     registration = None
     if config.accept_call:
