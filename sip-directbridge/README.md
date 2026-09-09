@@ -114,6 +114,19 @@ registration. The default SIP URI is `sip:smarthome@<intercom-ip>`.
 Supported codecs: G.711 PCMU (PT 0), G.711 PCMA (PT 8).
 Audio is bidirectional (`a=sendrecv`), 20ms ptime, plain RTP (no DTLS/SRTP).
 
+## FritzFon live image
+
+To display a live camera image on FritzFon when the doorbell rings,
+configure the MJPEG stream URL in the FritzBox telephony settings for
+the corresponding SIP device:
+
+```
+http://username:secret@$${IPINTERCOM}/mjpg/video.mjpg
+```
+
+Set the refresh interval to 1 second. This streams the MJPEG feed
+directly from the Intercom hardware and works reliably on FritzFon.
+
 ## WebSocket trigger details
 
 The bridge connects to the Miniserver via `wss://<ip>/ws/rfc6455` using
