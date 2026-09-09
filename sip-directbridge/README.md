@@ -121,7 +121,11 @@ configure the MJPEG stream URL in the FritzBox telephony settings for
 the corresponding SIP device:
 
 ```
-http://username:secret@$${IPINTERCOM}/mjpg/video.mjpg
+http://${LOXONE_MINISERVER_USER}:${LOXONE_MINISERVER_PASS}@${LOXONE_INTERCOM_IP}/mjpg/video.mjpg
+```
+for example:
+```
+http://myuser:mypassword@192.168.1.190/mjpg/video.mjpg
 ```
 
 Set the refresh interval to 1 second. This streams the MJPEG feed
