@@ -1175,9 +1175,11 @@ class SIPListener:
         self.bye_received = threading.Event()
         self.inbound_leg = None
         self._invite_pending = None
+        self.loop = None
 
     def start(self):
         self._running = True
+        self.loop = asyncio.get_event_loop()
         port = self.config.sip_listen_port
 
         self.tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1287,6 +1289,12 @@ class SIPListener:
 
         local_rtp_port = self.config.local_rtp_port_fritzbox
 
+        def send_msg(msg):
+            if is_udp and self.udp_sock:
+                self.udp_sock.sendto(msg, addr)
+            elif conn:
+                conn.sendall(msg)
+
         sdp_answer = (
             "v=0\r\n"
             f"o=bridge {int(time.time())} {int(time.time())} IN IP4 {self.config.local_ip}\r\n"
@@ -1306,15 +1314,13 @@ class SIPListener:
             "From": from_hdr, "To": to_hdr,
             "Call-ID": call_id, "CSeq": cseq,
         }, via=via)
-        if conn:
-            conn.sendall(trying)
+        send_msg(trying)
 
         ringing = sip_response(180, "Ringing", {
-            "From": from_hdr, f"To": f"{to_hdr};tag={to_tag}",
+            "From": from_hdr, "To": f"{to_hdr};tag={to_tag}",
             "Call-ID": call_id, "CSeq": cseq,
         }, via=via)
-        if conn:
-            conn.sendall(ringing)
+        send_msg(ringing)
 
         ok = (
             f"SIP/2.0 200 OK\r\n"
@@ -1328,28 +1334,27 @@ class SIPListener:
             f"Content-Length: {len(sdp_answer)}\r\n"
             "\r\n"
         ).encode() + sdp_answer
-
-        if conn:
-            conn.sendall(ok)
+        send_msg(ok)
 
         leg = InboundLeg(
             "inbound",
             self.config.local_ip,
             local_rtp_port,
-            conn,
+            conn if not is_udp else None,
             remote_ip,
             remote_port,
         )
         leg.setup_rtp()
-        leg.start_reader()
+        if not is_udp:
+            leg.start_reader()
 
         self.inbound_leg = leg
-        logger.info(f"Inbound leg ready: RTP {remote_ip}:{remote_port} <-> local:{local_rtp_port}")
+        logger.info(f"Inbound leg ready ({'UDP' if is_udp else 'TCP'}): RTP {remote_ip}:{remote_port} <-> local:{local_rtp_port}")
 
-        if self.on_incoming_call:
+        if self.on_incoming_call and self.loop:
             asyncio.run_coroutine_threadsafe(
                 self.on_incoming_call(leg),
-                asyncio.get_event_loop(),
+                self.loop,
             )
 
 
