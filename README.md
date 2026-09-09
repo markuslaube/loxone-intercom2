@@ -23,8 +23,7 @@ No Miniserver, no TLS, no reverse proxy — just the Intercom IP.
 
 ### [sip-directbridge](sip-directbridge/)
 
-Bridges the Intercom's SIP audio to any SIP account for integration in Home Assistant. 
-Makes your phone ring when someone's at the door and establishes a two-way audio intercom call.
+Bridges the Intercom's SIP audio to any SIP account for integration in Home Assistant. Makes your phone ring when someone's at the door and establishes a two-way audio intercom call. Also accepts incoming calls to reach the Intercom directly. Live image via direct MJPEG stream from the Intercom.
 
 **Status:** Beta · Audio only · [Details](sip-directbridge/)
 
