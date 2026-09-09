@@ -77,6 +77,17 @@ The bridge supports three trigger modes (mutually exclusive):
 | `WEBHOOK_PORT` | `42713` | HTTP server port (webhook mode only) |
 | `CALL_TIMEOUT` | `0` | Max call duration in seconds. 0 = no timeout. |
 
+### Incoming Calls
+
+| Variable | Default | Description |
+|---|---|---|
+| `ACCEPT_CALL` | `true` | Register as SIP extension and accept incoming calls. Dial the bridge's extension to speak to the Intercom visitor. Set to `false` to disable. |
+
+When enabled, the bridge registers at the SIP registrar using `SIP_USER`
+/ `SIP_PASSWORD` and maintains presence. Incoming calls are answered
+automatically and bridged to the Intercom. This runs alongside the
+normal doorbell trigger — both directions work simultaneously.
+
 ## Intercom SIP details
 
 The Intercom Gen.2 runs **baresip v1.0.0** internally and listens on

@@ -69,6 +69,7 @@ class Config:
         # Misc
         self.keepalive_seconds = int(env("KEEPALIVE_SECONDS", "240"))
         self.call_timeout = int(env("CALL_TIMEOUT", "0"))  # 0 = no timeout
+        self.accept_call = env("ACCEPT_CALL", "true").lower() in ("1", "yes", "true", "on")
 
     @staticmethod
     def _detect_local_ip():
@@ -1357,30 +1358,47 @@ class SIPListener:
 # ---------------------------------------------------------------------------
 
 async def main_async(config):
-    if config.trigger_mode == "inbound":
-        await main_inbound(config)
-        return
+    bridge = ConferenceBridge(config)
+    conference_busy = asyncio.Event()
+    conference_busy.clear()
 
     sip_listener = SIPListener(config)
     sip_listener.start()
 
-    bridge = ConferenceBridge(config)
-    bridge.bye_listener = sip_listener
-    trigger_busy = asyncio.Event()
-    trigger_busy.clear()
+    registration = None
+    if config.accept_call:
+        registration = SIPRegistration(config)
+        await registration.start()
+        logger.info("Accept-call enabled: registered as SIP extension, incoming calls forwarded to Intercom")
 
     async def on_trigger():
-        if trigger_busy.is_set():
+        if conference_busy.is_set():
             logger.warning("Trigger received but conference already active, ignoring")
             return
-        trigger_busy.set()
+        conference_busy.set()
         sip_listener.bye_received.clear()
         try:
             await bridge.run()
         except Exception as e:
             logger.error(f"Conference error: {e}")
         finally:
-            trigger_busy.clear()
+            conference_busy.clear()
+
+    async def on_incoming_call(inbound_leg):
+        if conference_busy.is_set():
+            logger.warning("Incoming call but conference already active, rejecting")
+            inbound_leg.close()
+            return
+        conference_busy.set()
+        try:
+            await bridge.run_inbound(inbound_leg)
+        except Exception as e:
+            logger.error(f"Inbound conference error: {e}")
+        finally:
+            conference_busy.clear()
+
+    if config.accept_call:
+        sip_listener.on_incoming_call = on_incoming_call
 
     if config.trigger_mode == "websocket":
         trigger = LoxoneWSClient(config, on_trigger)
@@ -1401,42 +1419,8 @@ async def main_async(config):
     finally:
         await trigger.stop()
         sip_listener.stop()
-
-
-async def main_inbound(config):
-    logger.info("Starting in inbound mode (waiting for calls to reach Intercom)...")
-
-    registration = SIPRegistration(config)
-    await registration.start()
-
-    bridge = ConferenceBridge(config)
-    call_active = asyncio.Event()
-    call_active.clear()
-
-    async def on_incoming_call(inbound_leg):
-        if call_active.is_set():
-            logger.warning("Incoming call but conference already active, rejecting")
-            inbound_leg.close()
-            return
-        call_active.set()
-        try:
-            await bridge.run_inbound(inbound_leg)
-        except Exception as e:
-            logger.error(f"Inbound conference error: {e}")
-        finally:
-            call_active.clear()
-
-    sip_listener = SIPListener(config, on_incoming_call=on_incoming_call)
-    sip_listener.start()
-
-    try:
-        while True:
-            await asyncio.sleep(3600)
-    except asyncio.CancelledError:
-        pass
-    finally:
-        sip_listener.stop()
-        await registration.stop()
+        if registration:
+            await registration.stop()
 
 
 def main():
@@ -1448,8 +1432,6 @@ def main():
                        help="Listen for HTTP webhook triggers on WEBHOOK_PORT")
     group.add_argument("--mqtt", action="store_true",
                        help="Listen for MQTT triggers (placeholder)")
-    group.add_argument("--inbound", action="store_true",
-                       help="Register as SIP extension and accept incoming calls to reach Intercom")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose logging")
     args = parser.parse_args()
 
@@ -1465,8 +1447,6 @@ def main():
         config.trigger_mode = "webhook"
     elif args.mqtt:
         config.trigger_mode = "mqtt"
-    elif args.inbound:
-        config.trigger_mode = "inbound"
 
     asyncio.run(main_async(config))
 
