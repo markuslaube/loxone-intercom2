@@ -4,10 +4,14 @@
 
 Bridges the Intercom's SIP audio to any SIP account — makes your phone
 ring when someone's at the door and lets you talk to the visitor.
+Supports both directions: doorbell-triggered outbound calls and
+inbound calls to reach the Intercom directly.
 
 ## How it works
 
 ```
+Direction 1: Doorbell → Phone (outbound)
+─────────────────────────────────────────────
 Doorbell Event (WebSocket / Webhook)
     │
     ▼
@@ -15,13 +19,26 @@ sip-directbridge
     ├── SIP INVITE → Intercom (TCP 5060, no auth)    [visitor audio]
     ├── SIP INVITE → FritzBox / SIP phone             [your phone rings]
     ├── RTP Bridge: Intercom ⟷ FritzBox               [audio forwarding]
-    ├── BYE Listener: 5060 TCP+UDP                     [detects hangup]
+    ├── SIP Listener: 5060 TCP+UDP                     [detects hangup]
     └── Self = muted (PCMU silence to both)
+
+Direction 2: Phone → Intercom (inbound, ACCEPT_CALL=true)
+─────────────────────────────────────────────
+Someone dials the bridge's SIP extension (**623)
+    │
+    ▼
+sip-directbridge
+    ├── SIP REGISTER → FritzBox (periodic, keeps extension reachable)
+    ├── SIP INVITE ← FritzBox (incoming call)
+    ├── 200 OK → FritzBox (auto-answer)
+    ├── SIP INVITE → Intercom (TCP 5060, no auth)
+    ├── RTP Bridge: Caller ⟷ Intercom
+    └── BYE from either side → clean teardown
 ```
 
-You pick up the phone → two-way audio runs between you and the visitor
-through the bridge. Hang up → BYE is received via UDP → bridge tears
-down both legs and waits for the next doorbell event.
+Pick up the phone → two-way audio runs between you and the visitor
+through the bridge. Hang up → BYE is received → bridge tears down both
+legs and waits for the next event. Both directions work simultaneously.
 
 ## Trigger Modes
 
@@ -77,6 +94,17 @@ The bridge supports three trigger modes (mutually exclusive):
 | `WEBHOOK_PORT` | `42713` | HTTP server port (webhook mode only) |
 | `CALL_TIMEOUT` | `0` | Max call duration in seconds. 0 = no timeout. |
 
+### Incoming Calls
+
+| Variable | Default | Description |
+|---|---|---|
+| `ACCEPT_CALL` | `true` | Register as SIP extension and accept incoming calls. Dial the bridge's extension to speak to the Intercom visitor. Set to `false` to disable. |
+
+When enabled, the bridge registers at the SIP registrar using `SIP_USER`
+/ `SIP_PASSWORD` and maintains presence. Incoming calls are answered
+automatically and bridged to the Intercom. This runs alongside the
+normal doorbell trigger — both directions work simultaneously.
+
 ## Intercom SIP details
 
 The Intercom Gen.2 runs **baresip v1.0.0** internally and listens on
@@ -103,17 +131,23 @@ handled automatically.
 ## BYE handling
 
 The FritzBox sends its BYE (hangup) signal via **UDP** on port 5060, not
-on the existing TCP SIP connection. The bridge runs a dedicated listener
-on port 5060 (TCP+UDP) that catches incoming BYE requests and cleanly
-tears down both call legs.
+on the existing TCP SIP connection. The bridge runs a dedicated SIP
+listener on port 5060 (TCP+UDP) that handles:
+
+- **BYE** — tears down both call legs cleanly (sends BYE to Intercom)
+- **OPTIONS** — responds with supported methods
+- **INVITE** — accepts incoming calls (when `ACCEPT_CALL=true`), answers
+  with 200 OK + SDP, and bridges audio to the Intercom
 
 ## Status
 
 Working. End-to-end tested with:
 - WebSocket trigger (Miniserver doorbell event → automatic call)
 - Webhook trigger (manual `POST /trigger`)
-- FritzBox SIP (Digest auth, no prior registration needed)
-- BYE detection via UDP listener
+- FritzBox SIP (Digest auth, no prior registration needed for outbound)
+- FritzBox SIP registration (inbound calls, periodic re-registration)
+- Inbound calls (dial bridge extension → forwarded to Intercom)
+- BYE detection via UDP listener (both directions)
 - Auto-discovery of doorbell UUID from `LoxAPP3.json`
 
 ## License

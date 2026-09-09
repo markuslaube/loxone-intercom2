@@ -69,6 +69,7 @@ class Config:
         # Misc
         self.keepalive_seconds = int(env("KEEPALIVE_SECONDS", "240"))
         self.call_timeout = int(env("CALL_TIMEOUT", "0"))  # 0 = no timeout
+        self.accept_call = env("ACCEPT_CALL", "true").lower() in ("1", "yes", "true", "on")
 
     @staticmethod
     def _detect_local_ip():
@@ -739,6 +740,259 @@ def zlib_random_ssrc():
     return random.randint(1, 0xFFFFFFFF)
 
 
+# ---------------------------------------------------------------------------
+# SIP Registration (maintains presence at FritzBox for inbound calls)
+# ---------------------------------------------------------------------------
+
+class SIPRegistration:
+    def __init__(self, config):
+        self.config = config
+        self._task = None
+        self._registered = False
+
+    async def start(self):
+        self._task = asyncio.create_task(self._registration_loop())
+
+    async def stop(self):
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+
+    async def _registration_loop(self):
+        while True:
+            try:
+                expires = await self._register_once()
+                self._registered = True
+                refresh = max(expires - 30, 60)
+                logger.info(f"Registered at {self.config.sip_registrar}, refreshing in {refresh}s")
+                await asyncio.sleep(refresh)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                self._registered = False
+                logger.error(f"Registration failed: {e}, retrying in 30s")
+                await asyncio.sleep(30)
+
+    async def _register_once(self) -> int:
+        cfg = self.config
+        reg_uri = f"sip:{cfg.sip_registrar}"
+        local_contact = f"sip:{cfg.sip_user}@{cfg.local_ip}:{cfg.sip_listen_port}"
+        call_id = hashlib.md5(f"reg-{time.time()}".encode()).hexdigest()[:16]
+        from_tag = hashlib.md5(cfg.sip_user.encode()).hexdigest()[:8]
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(15)
+        sock.connect((cfg.sip_registrar, 5060))
+
+        def build_register(auth_header=""):
+            return (
+                f"REGISTER {reg_uri} SIP/2.0\r\n"
+                f"Via: SIP/2.0/TCP {cfg.local_ip}:{cfg.sip_listen_port};branch=z9hG4bKreg{int(time.time())};rport\r\n"
+                f"From: <sip:{cfg.sip_user}@{cfg.sip_registrar}>;tag={from_tag}\r\n"
+                f"To: <sip:{cfg.sip_user}@{cfg.sip_registrar}>\r\n"
+                f"Call-ID: {call_id}@{cfg.local_ip}\r\n"
+                f"CSeq: 1 REGISTER\r\n"
+                "Max-Forwards: 70\r\n"
+                f"Contact: <{local_contact}>\r\n"
+                f"Expires: 600\r\n"
+                f"{auth_header}"
+                "Content-Length: 0\r\n"
+                "\r\n"
+            ).encode()
+
+        sock.sendall(build_register())
+        resp = self._recv_sip(sock, timeout=10)
+        status, headers, _ = self._parse_response(resp)
+
+        if status == 401 and cfg.sip_password:
+            realm, nonce = self._parse_auth_challenge(headers.get("WWW-Authenticate", ""))
+            ha1 = hashlib.md5(f"{cfg.sip_user}:{realm}:{cfg.sip_password}".encode()).hexdigest()
+            ha2 = hashlib.md5(f"REGISTER:{reg_uri}".encode()).hexdigest()
+            response = hashlib.md5(f"{ha1}:{nonce}:{ha2}".encode()).hexdigest()
+            auth_hdr = (
+                f'Authorization: Digest username="{cfg.sip_user}",'
+                f'realm="{realm}",nonce="{nonce}",'
+                f'uri="{reg_uri}",response="{response}",algorithm=MD5\r\n'
+            )
+            sock.sendall(build_register(auth_hdr))
+            resp = self._recv_sip(sock, timeout=10)
+            status, headers, _ = self._parse_response(resp)
+
+        sock.close()
+
+        if status != 200:
+            raise RuntimeError(f"REGISTER failed with status {status}")
+
+        expires = 600
+        for line in headers.get("Expires", "600").strip().split(","):
+            try:
+                expires = int(line.strip())
+                break
+            except ValueError:
+                continue
+        return expires
+
+    @staticmethod
+    def _recv_sip(sock, timeout=10):
+        deadline = time.time() + timeout
+        buf = b""
+        while time.time() < deadline:
+            sock.settimeout(min(deadline - time.time(), 5))
+            try:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+                if b"\r\n\r\n" in buf:
+                    header, _, rest = buf.partition(b"\r\n\r\n")
+                    cl = 0
+                    for line in header.split(b"\r\n"):
+                        if line.lower().startswith(b"content-length:"):
+                            cl = int(line.split(b":")[1].strip())
+                    if len(rest) >= cl:
+                        return header + b"\r\n\r\n" + rest[:cl]
+            except socket.timeout:
+                continue
+        return buf
+
+    @staticmethod
+    def _parse_response(data):
+        text = data.decode(errors="replace")
+        lines = text.split("\r\n")
+        status = int(lines[0].split()[1]) if len(lines) > 1 and len(lines[0].split()) > 1 else 0
+        headers = {}
+        for line in lines[1:]:
+            if line == "":
+                break
+            if ":" in line:
+                k, v = line.split(":", 1)
+                headers[k.strip()] = v.strip()
+        return status, headers, ""
+
+    @staticmethod
+    def _parse_auth_challenge(header):
+        realm = ""
+        nonce = ""
+        for kv in header[len("Digest "):].split(","):
+            k, v = kv.strip().split("=", 1)
+            if k == "realm":
+                realm = v.strip('"')
+            elif k == "nonce":
+                nonce = v.strip('"')
+        return realm, nonce
+
+
+# ---------------------------------------------------------------------------
+# Inbound Leg (accepted incoming call from FritzBox)
+# ---------------------------------------------------------------------------
+
+class InboundLeg:
+    def __init__(self, name, local_ip, rtp_port, tcp_conn, remote_rtp_ip, remote_rtp_port):
+        self.name = name
+        self.local_ip = local_ip
+        self.rtp_port = rtp_port
+        self.tcp_conn = tcp_conn
+        self.remote_rtp_ip = remote_rtp_ip
+        self.remote_rtp_port = remote_rtp_port
+        self.rtp_sock = None
+        self.ssrc = zlib_random_ssrc()
+        self.rtp_seq = 0
+        self.rtp_ts = 0
+        self._bye_received = threading.Event()
+        self._reader_thread = None
+
+    def setup_rtp(self):
+        self.rtp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.rtp_sock.bind(("0.0.0.0", self.rtp_port))
+        self.rtp_sock.setblocking(False)
+
+    def start_reader(self):
+        def reader():
+            try:
+                self.tcp_conn.settimeout(None)
+                buf = b""
+                while not self._bye_received.is_set():
+                    try:
+                        chunk = self.tcp_conn.recv(4096)
+                        if not chunk:
+                            logger.info(f"{self.name}: TCP closed by peer")
+                            self._bye_received.set()
+                            break
+                        buf += chunk
+                        while b"\r\n\r\n" in buf:
+                            msg, _, buf = buf.partition(b"\r\n\r\n")
+                            text = msg.decode(errors="replace")
+                            first_line = text.split("\r\n")[0]
+                            if "BYE" in first_line:
+                                logger.info(f"{self.name}: received BYE")
+                                self._bye_received.set()
+                                self._send_bye_ok(text)
+                                break
+                    except (OSError, socket.error):
+                        self._bye_received.set()
+                        break
+            except Exception as e:
+                logger.debug(f"{self.name}: reader error: {e}")
+                self._bye_received.set()
+
+        self._reader_thread = threading.Thread(target=reader, daemon=True)
+        self._reader_thread.start()
+
+    def _send_bye_ok(self, bye_msg):
+        try:
+            via = bye_msg.split("Via: ")[1].split("\r\n")[0]
+            from_hdr = bye_msg.split("From: ")[1].split("\r\n")[0]
+            to_hdr = bye_msg.split("To: ")[1].split("\r\n")[0]
+            call_id = bye_msg.split("Call-ID: ")[1].split("\r\n")[0]
+            cseq = bye_msg.split("CSeq: ")[1].split("\r\n")[0]
+            resp = (
+                "SIP/2.0 200 OK\r\n"
+                f"Via: {via}\r\n"
+                f"From: {from_hdr}\r\n"
+                f"To: {to_hdr}\r\n"
+                f"Call-ID: {call_id}\r\n"
+                f"CSeq: {cseq}\r\n"
+                "Content-Length: 0\r\n"
+                "\r\n"
+            ).encode()
+            self.tcp_conn.sendall(resp)
+        except Exception:
+            pass
+
+    def send_rtp(self, payload, pt=0):
+        pkt = build_rtp(self.rtp_seq, self.rtp_ts, self.ssrc, payload, pt)
+        self.rtp_sock.sendto(pkt, (self.remote_rtp_ip, self.remote_rtp_port))
+        self.rtp_seq += 1
+        self.rtp_ts += 160
+
+    def send_silence(self):
+        self.send_rtp(b'\xff' * 160)
+
+    def close(self):
+        try:
+            self.tcp_conn.close()
+        except Exception:
+            pass
+        if self.rtp_sock:
+            self.rtp_sock.close()
+
+
+def parse_sdp(body: str) -> tuple[str | None, int | None]:
+    ip = None
+    port = None
+    for line in body.split("\r\n"):
+        if line.startswith("c=IN IP4 "):
+            ip = line.split()[-1]
+        elif line.startswith("m=audio"):
+            parts = line.split()
+            if len(parts) >= 2:
+                port = int(parts[1])
+    return ip, port
+
+
 class ConferenceBridge:
     def __init__(self, config):
         self.config = config
@@ -746,7 +1000,7 @@ class ConferenceBridge:
 
     async def run(self):
         self.active = True
-        logger.info("Starting SIP conference...")
+        logger.info("Starting SIP conference (outbound)...")
 
         leg_intercom = SIPLeg(
             "intercom",
@@ -789,6 +1043,36 @@ class ConferenceBridge:
         logger.info("Conference ended")
         leg_intercom.close()
         leg_fritzbox.close()
+        self.active = False
+
+    async def run_inbound(self, inbound_leg: InboundLeg):
+        self.active = True
+        logger.info("Starting SIP conference (inbound)...")
+
+        leg_intercom = SIPLeg(
+            "intercom",
+            self.config.intercom_ip, 5060,
+            self.config.local_ip, self.config.local_rtp_port_intercom,
+            f"sip:smarthome@{self.config.intercom_ip}",
+        )
+
+        try:
+            await leg_intercom.connect()
+            leg_intercom.invite()
+        except Exception as e:
+            logger.error(f"Intercom call failed: {e}")
+            leg_intercom.close()
+            inbound_leg.close()
+            self.active = False
+            return
+
+        logger.info("Inbound + Intercom legs established, bridging audio...")
+
+        await self._bridge_rtp(inbound_leg, leg_intercom)
+
+        logger.info("Conference ended")
+        leg_intercom.close()
+        inbound_leg.close()
         self.active = False
 
     async def _bridge_rtp(self, leg_a, leg_b):
@@ -877,21 +1161,26 @@ def sip_response(status_code, reason, headers_dict, body=b"", via="", extra=""):
 
 
 # ---------------------------------------------------------------------------
-# BYE Listener (listens on 5060 TCP+UDP for incoming BYE from FritzBox)
+# SIP Listener (listens on 5060 TCP+UDP for BYE, OPTIONS, and inbound INVITE)
 # ---------------------------------------------------------------------------
 
-class ByeListener:
-    def __init__(self, config):
+class SIPListener:
+    def __init__(self, config, on_incoming_call=None):
         self.config = config
+        self.on_incoming_call = on_incoming_call
         self._running = False
         self.tcp_sock = None
         self.udp_sock = None
         self._threads = []
         self.bye_received = threading.Event()
+        self.inbound_leg = None
+        self._invite_pending = None
+        self.loop = None
 
     def start(self):
         self._running = True
-        port = self.config.sip_listen_port if hasattr(self.config, 'sip_listen_port') else 5060
+        self.loop = asyncio.get_event_loop()
+        port = self.config.sip_listen_port
 
         self.tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.tcp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -910,7 +1199,7 @@ class ByeListener:
         t2.start()
         self._threads.append(t2)
 
-        logger.info(f"BYE listener on port {port} (TCP+UDP)")
+        logger.info(f"SIP listener on port {port} (TCP+UDP)")
 
     def stop(self):
         self._running = False
@@ -932,14 +1221,12 @@ class ByeListener:
 
     def _handle_tcp(self, conn, addr):
         try:
-            conn.settimeout(10)
+            conn.settimeout(30)
             data = conn.recv(4096)
             if data:
                 self._process(data, conn, addr, is_udp=False)
         except Exception:
             pass
-        finally:
-            conn.close()
 
     def _udp_loop(self):
         while self._running:
@@ -967,7 +1254,11 @@ class ByeListener:
             elif conn:
                 conn.sendall(resp)
 
-        if method == "BYE":
+        if method == "INVITE":
+            logger.info(f"Incoming INVITE from {addr}")
+            self._handle_invite(conn, addr, is_udp, data, via, from_hdr, to_hdr, call_id, cseq, body)
+
+        elif method == "BYE":
             logger.info(f"BYE received from {addr} ({'UDP' if is_udp else 'TCP'})")
             self.bye_received.set()
             resp = sip_response(200, "OK", {
@@ -975,19 +1266,96 @@ class ByeListener:
                 "Call-ID": call_id, "CSeq": cseq,
             }, via=via)
             send_resp(resp)
+
         elif method == "OPTIONS":
             resp = sip_response(200, "OK", {
                 "From": from_hdr, "To": to_hdr,
                 "Call-ID": call_id, "CSeq": cseq,
             }, via=via, extra="Allow: INVITE,ACK,BYE,CANCEL,OPTIONS\r\n")
             send_resp(resp)
+
         else:
-            logger.debug(f"BYE listener: {method} from {addr}")
+            logger.debug(f"SIP listener: {method} from {addr}")
             resp = sip_response(200, "OK", {
                 "From": from_hdr, "To": to_hdr,
                 "Call-ID": call_id, "CSeq": cseq,
             }, via=via)
             send_resp(resp)
+
+    def _handle_invite(self, conn, addr, is_udp, raw_data, via, from_hdr, to_hdr, call_id, cseq, body):
+        remote_ip, remote_port = parse_sdp(body)
+        if remote_ip is None:
+            remote_ip = addr[0] if addr else self.config.sip_registrar
+
+        local_rtp_port = self.config.local_rtp_port_fritzbox
+
+        def send_msg(msg):
+            if is_udp and self.udp_sock:
+                self.udp_sock.sendto(msg, addr)
+            elif conn:
+                conn.sendall(msg)
+
+        sdp_answer = (
+            "v=0\r\n"
+            f"o=bridge {int(time.time())} {int(time.time())} IN IP4 {self.config.local_ip}\r\n"
+            "s=bridge\r\n"
+            f"c=IN IP4 {self.config.local_ip}\r\n"
+            "t=0 0\r\n"
+            f"m=audio {local_rtp_port} RTP/AVP 0 8\r\n"
+            "a=rtpmap:0 PCMU/8000\r\n"
+            "a=rtpmap:8 PCMA/8000\r\n"
+            "a=sendrecv\r\n"
+            "a=ptime:20\r\n"
+        ).encode()
+
+        to_tag = hashlib.md5(call_id.encode()).hexdigest()[:8]
+
+        trying = sip_response(100, "Trying", {
+            "From": from_hdr, "To": to_hdr,
+            "Call-ID": call_id, "CSeq": cseq,
+        }, via=via)
+        send_msg(trying)
+
+        ringing = sip_response(180, "Ringing", {
+            "From": from_hdr, "To": f"{to_hdr};tag={to_tag}",
+            "Call-ID": call_id, "CSeq": cseq,
+        }, via=via)
+        send_msg(ringing)
+
+        ok = (
+            f"SIP/2.0 200 OK\r\n"
+            f"Via: {via}\r\n"
+            f"From: {from_hdr}\r\n"
+            f"To: {to_hdr};tag={to_tag}\r\n"
+            f"Call-ID: {call_id}\r\n"
+            f"CSeq: {cseq}\r\n"
+            f"Contact: <sip:{self.config.sip_user}@{self.config.local_ip}:{self.config.sip_listen_port}>\r\n"
+            "Content-Type: application/sdp\r\n"
+            f"Content-Length: {len(sdp_answer)}\r\n"
+            "\r\n"
+        ).encode() + sdp_answer
+        send_msg(ok)
+
+        leg = InboundLeg(
+            "inbound",
+            self.config.local_ip,
+            local_rtp_port,
+            conn if not is_udp else None,
+            remote_ip,
+            remote_port,
+        )
+        leg.setup_rtp()
+        if not is_udp:
+            leg.start_reader()
+
+        self.inbound_leg = leg
+        logger.info(f"Inbound leg ready ({'UDP' if is_udp else 'TCP'}): RTP {remote_ip}:{remote_port} <-> local:{local_rtp_port}")
+
+        if self.on_incoming_call and self.loop:
+            asyncio.run_coroutine_threadsafe(
+                self.on_incoming_call(leg),
+                self.loop,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -995,26 +1363,47 @@ class ByeListener:
 # ---------------------------------------------------------------------------
 
 async def main_async(config):
-    bye_listener = ByeListener(config)
-    bye_listener.start()
+    sip_listener = SIPListener(config)
+    sip_listener.start()
 
     bridge = ConferenceBridge(config)
-    bridge.bye_listener = bye_listener
-    trigger_busy = asyncio.Event()
-    trigger_busy.clear()
+    bridge.bye_listener = sip_listener
+    conference_busy = asyncio.Event()
+
+    registration = None
+    if config.accept_call:
+        registration = SIPRegistration(config)
+        await registration.start()
+        logger.info("Accept-call enabled: registered as SIP extension, incoming calls forwarded to Intercom")
 
     async def on_trigger():
-        if trigger_busy.is_set():
+        if conference_busy.is_set():
             logger.warning("Trigger received but conference already active, ignoring")
             return
-        trigger_busy.set()
-        bye_listener.bye_received.clear()
+        conference_busy.set()
+        sip_listener.bye_received.clear()
         try:
             await bridge.run()
         except Exception as e:
             logger.error(f"Conference error: {e}")
         finally:
-            trigger_busy.clear()
+            conference_busy.clear()
+
+    async def on_incoming_call(inbound_leg):
+        if conference_busy.is_set():
+            logger.warning("Incoming call but conference already active, rejecting")
+            inbound_leg.close()
+            return
+        conference_busy.set()
+        try:
+            await bridge.run_inbound(inbound_leg)
+        except Exception as e:
+            logger.error(f"Inbound conference error: {e}")
+        finally:
+            conference_busy.clear()
+
+    if config.accept_call:
+        sip_listener.on_incoming_call = on_incoming_call
 
     if config.trigger_mode == "websocket":
         trigger = LoxoneWSClient(config, on_trigger)
@@ -1034,6 +1423,9 @@ async def main_async(config):
         pass
     finally:
         await trigger.stop()
+        sip_listener.stop()
+        if registration:
+            await registration.stop()
 
 
 def main():
