@@ -47,7 +47,7 @@ echo "[start] pipeline: bridge.py | ffmpeg -> $RTSP_PUBLISH"
 while true; do
     python3 /opt/loxone-bridge/bridge.py 2>>/tmp/bridge.log | \
         ffmpeg -hide_banner -loglevel error \
-               -f h264 -i - \
+               -f h264 -use_wallclock_as_timestamps 1 -i - \
                -c copy \
                -rtsp_transport tcp \
                -f rtsp "$RTSP_PUBLISH"
