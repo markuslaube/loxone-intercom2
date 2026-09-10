@@ -16,8 +16,8 @@ Doorbell Event (WebSocket / Webhook)
     │
     ▼
 sip-directbridge
-    ├── SIP INVITE → Intercom (TCP 5060, no auth)    [visitor audio]
-    ├── SIP INVITE → FritzBox / SIP phone             [your phone rings]
+    ├── SIP INVITE → Intercom (TCP 5060, no auth)      [visitor audio]
+    ├── SIP INVITE → FritzBox / SIP phone              [your phone rings]
     ├── RTP Bridge: Intercom ⟷ FritzBox               [audio forwarding]
     ├── SIP Listener: 5060 TCP+UDP                     [detects hangup]
     └── Self = muted (PCMU silence to both)
@@ -84,6 +84,7 @@ The bridge supports three trigger modes (mutually exclusive):
 | `SIP_USER` | `sipuser` | SIP account username |
 | `SIP_PASSWORD` | `sippassword` | SIP account password |
 | `SIP_DESTINATION` | `**610` | Number to call (FritzBox internal extension) |
+| `ACCEPT_CALL` | `true` | Register as SIP extension and accept incoming calls. Dial the bridge's extension to speak to the Intercom visitor. Set to `false` to disable. When enabled, the bridge registers at the SIP registrar using `SIP_USER`/ `SIP_PASSWORD` and maintains presence. Incoming calls are answered automatically and bridged to the Intercom. This runs alongside the normal doorbell trigger — both directions work simultaneously.|
 
 ### Networking
 
@@ -93,17 +94,6 @@ The bridge supports three trigger modes (mutually exclusive):
 | `SIP_LISTEN_PORT` | `5060` | SIP listener for incoming BYE (TCP+UDP) |
 | `WEBHOOK_PORT` | `42713` | HTTP server port (webhook mode only) |
 | `CALL_TIMEOUT` | `0` | Max call duration in seconds. 0 = no timeout. |
-
-### Incoming Calls
-
-| Variable | Default | Description |
-|---|---|---|
-| `ACCEPT_CALL` | `true` | Register as SIP extension and accept incoming calls. Dial the bridge's extension to speak to the Intercom visitor. Set to `false` to disable. |
-
-When enabled, the bridge registers at the SIP registrar using `SIP_USER`
-/ `SIP_PASSWORD` and maintains presence. Incoming calls are answered
-automatically and bridged to the Intercom. This runs alongside the
-normal doorbell trigger — both directions work simultaneously.
 
 ## Intercom SIP details
 
